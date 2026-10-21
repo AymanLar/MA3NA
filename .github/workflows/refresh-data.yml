@@ -1,0 +1,66 @@
+name: Refresh cached data
+
+# The application has no backend and no runtime network access. This job is
+# what keeps the cached snapshots current: it retrieves the official sources,
+# validates the records, and commits the result. The commit then goes through
+# CI and deploys on its own.
+
+on:
+  schedule:
+    # 06:17 UTC daily, after the Casablanca trading day has closed.
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-data
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Retrieve and commit official snapshots
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Fetch official data
+        run: npm run fetch-data
+
+      - name: Check the pipeline result
+        run: |
+          node -e "
+            const m = require('./data/manifest.json');
+            if (m.status !== 'VALID') {
+              console.error('pipeline reported status ' + m.status);
+              if (m.quality && m.quality.issues) console.error(m.quality.issues.join('\n'));
+              process.exit(1);
+            }
+            const failed = (m.data && m.data.failed) || [];
+            if (failed.length) {
+              console.error('pipeline reported failures:');
+              for (const f of failed) console.error('- ' + JSON.stringify(f));
+              process.exit(1);
+            }
+            console.log('manifest VALID');
+          "
+
+      - name: Commit refreshed snapshots
+        run: |
+          if [ -z "$(git status --porcelain -- data)" ]; then
+            echo "The cached snapshots are already current."
+            exit 0
+          fi
+          git config user.name "ma3na-data-bot"
+          git config user.email "ma3na-data-bot@users.noreply.github.com"
+          git add data
+          git commit -m "Refresh cached official snapshots"
+          git push
